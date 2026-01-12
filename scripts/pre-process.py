@@ -4,76 +4,68 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 from tqdm import tqdm
 import albumentations as A
+import random
 
 # ------------------------------
 # Config
 # ------------------------------
-RAW_DATA_DIR = "data/raw/images"              # folder with raw images
-ANNOTATIONS_DIR = "data/annotations/annotations"  # folder with XML files
-PROCESSED_DATA_DIR = "data/processed"        # folder to save processed images
-IMG_SIZE = 416                               # resize images to 416x416
+RAW_DATA_DIR = "data/raw/images"
+ANNOTATIONS_DIR = "data/annotations/annotations"
+PROCESSED_DATA_DIR = "data/processed"
+IMG_SIZE = 416
 
-# Class mapping for this dataset
+TARGET_COUNTS = {
+    "with_mask": 1800,
+    "without_mask": 900,
+    "mask_weared_incorrect": 800
+}
+
 CLASS_MAP = {
     "with_mask": 0,
     "without_mask": 1,
-    "mask_weared_incorrect": 2  # only if this class exists
+    "mask_weared_incorrect": 2
 }
 
-# CSV file to save annotations
 CSV_FILE = os.path.join(PROCESSED_DATA_DIR, "annotations.csv")
-
-# Folder to save processed images
 PROCESSED_IMAGE_FOLDER = os.path.join(PROCESSED_DATA_DIR, "images")
+
 os.makedirs(PROCESSED_IMAGE_FOLDER, exist_ok=True)
+random.seed(42)
 
 # ------------------------------
 # 1. Utility Functions
 # ------------------------------
 
 def load_image(img_path):
-    """Load an image in RGB format"""
     img = cv2.imread(img_path)
     if img is None:
         raise ValueError(f"Unable to load image: {img_path}")
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 def resize_image(img, size=IMG_SIZE):
-    """Resize image to square size"""
     return cv2.resize(img, (size, size))
-
-def normalize_image(img):
-    """Normalize pixel values to [0,1]"""
-    return img / 255.0
 
 # ------------------------------
 # 2. XML Annotation Parsing
 # ------------------------------
 
 def parse_annotation(xml_file):
-    """
-    Parse XML file and return a list of objects:
-    [(class_label, xmin, ymin, xmax, ymax), ...]
-    """
     objects = []
     tree = ET.parse(xml_file)
     root = tree.getroot()
 
     for obj in root.findall("object"):
-        class_name = obj.find("name").text.strip().lower()  # remove spaces & lowercase
-
-        # Skip unknown classes
+        class_name = obj.find("name").text.strip().lower()
         if class_name not in CLASS_MAP:
             continue
 
-        class_label = class_name
         bbox = obj.find("bndbox")
         xmin = int(float(bbox.find("xmin").text))
         ymin = int(float(bbox.find("ymin").text))
         xmax = int(float(bbox.find("xmax").text))
         ymax = int(float(bbox.find("ymax").text))
 
-        objects.append((class_label, xmin, ymin, xmax, ymax))
+        objects.append((class_name, xmin, ymin, xmax, ymax))
 
     return objects
 
@@ -81,92 +73,162 @@ def parse_annotation(xml_file):
 # 3. Data Augmentation
 # ------------------------------
 
-augmenter = A.Compose([
-    A.HorizontalFlip(p=0.5),
-    A.RandomBrightnessContrast(p=0.5),
-    A.Rotate(limit=15, p=0.3),
-    A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.3)
-], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
+augmenter = A.Compose(
+    [
+        A.HorizontalFlip(p=0.5),
+        A.RandomBrightnessContrast(p=0.3),
+        A.Rotate(limit=10, p=0.3),
+        A.ShiftScaleRotate(
+            shift_limit=0.05,
+            scale_limit=0.05,
+            rotate_limit=0,
+            p=0.3
+        )
+    ],
+    bbox_params=A.BboxParams(
+        format="pascal_voc",
+        label_fields=["class_labels"]
+    )
+)
 
-def augment_image(img, bboxes, class_labels):
-    """
-    Apply augmentation to the image and bounding boxes
-    """
-    augmented = augmenter(image=img, bboxes=bboxes, class_labels=class_labels)
-    return augmented['image'], augmented['bboxes'], augmented['class_labels']
+def augment_image(img, bboxes, labels):
+    augmented = augmenter(
+        image=img,
+        bboxes=bboxes,
+        class_labels=labels
+    )
+    return augmented["image"], augmented["bboxes"], augmented["class_labels"]
 
 # ------------------------------
-# 4. Preprocessing Pipeline
+# 4. Preprocessing + Hybrid Balancing
 # ------------------------------
 
 def preprocess_dataset():
     os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
-    data_records = []
+    class_buckets = {
+        "with_mask": [],
+        "without_mask": [],
+        "mask_weared_incorrect": []
+    }
 
-    # List all images
-    image_files = [f for f in os.listdir(RAW_DATA_DIR) if f.endswith(('.jpg', '.png'))]
+    image_files = [
+        f for f in os.listdir(RAW_DATA_DIR)
+        if f.endswith((".jpg", ".png"))
+    ]
 
-    for img_file in tqdm(image_files, desc="Processing images"):
+    print("🔹 Parsing and resizing images...")
+
+    for img_file in tqdm(image_files):
         img_path = os.path.join(RAW_DATA_DIR, img_file)
-        xml_path = os.path.join(ANNOTATIONS_DIR, img_file.replace('.jpg', '.xml').replace('.png', '.xml'))
+        xml_path = os.path.join(
+            ANNOTATIONS_DIR,
+            img_file.replace(".jpg", ".xml").replace(".png", ".xml")
+        )
+
+        if not os.path.exists(xml_path):
+            continue
 
         try:
-            # Load image
             img = load_image(img_path)
-            original_h, original_w = img.shape[:2]
+            h, w = img.shape[:2]
+            img = resize_image(img)
 
-            # Parse annotations
+            scale_x = IMG_SIZE / w
+            scale_y = IMG_SIZE / h
+
             objects = parse_annotation(xml_path)
-            if len(objects) == 0:
-                continue  # skip images without valid objects
+            if not objects:
+                continue
 
-            # Separate bboxes and labels
-            bboxes = [(xmin, ymin, xmax, ymax) for _, xmin, ymin, xmax, ymax in objects]
-            class_labels = [label for label, *_ in objects]
+            for label, xmin, ymin, xmax, ymax in objects:
+                bbox = (
+                    int(xmin * scale_x),
+                    int(ymin * scale_y),
+                    int(xmax * scale_x),
+                    int(ymax * scale_y)
+                )
 
-            # Resize image
-            img_resized = resize_image(img)
-            scale_x = IMG_SIZE / original_w
-            scale_y = IMG_SIZE / original_h
-
-            # Resize bounding boxes
-            resized_bboxes = []
-            for bbox in bboxes:
-                xmin, ymin, xmax, ymax = bbox
-                xmin = int(xmin * scale_x)
-                ymin = int(ymin * scale_y)
-                xmax = int(xmax * scale_x)
-                ymax = int(ymax * scale_y)
-                resized_bboxes.append((xmin, ymin, xmax, ymax))
-
-            # Optional: apply augmentation
-            img_aug, aug_bboxes, aug_labels = augment_image(img_resized, resized_bboxes, class_labels)
-
-            # Save processed image
-            save_img_path = os.path.join(PROCESSED_IMAGE_FOLDER, img_file)
-            cv2.imwrite(save_img_path, cv2.cvtColor(img_aug, cv2.COLOR_RGB2BGR))
-
-            # Save annotation records for CSV
-            for bbox, label in zip(aug_bboxes, aug_labels):
-                xmin, ymin, xmax, ymax = bbox
-                data_records.append({
+                class_buckets[label].append({
                     "image": img_file,
-                    "xmin": xmin,
-                    "ymin": ymin,
-                    "xmax": xmax,
-                    "ymax": ymax,
-                    "class_label": label
+                    "img_array": img,
+                    "bbox": bbox,
+                    "label": label
                 })
 
         except Exception as e:
-            print(f"Error processing {img_file}: {e}")
+            print(f"❌ Error processing {img_file}: {e}")
 
-    # Save all annotations to CSV
-    df = pd.DataFrame(data_records)
+    print("🔹 Applying hybrid class balancing...")
+
+    final_records = []
+
+    for class_name, samples in class_buckets.items():
+        target = TARGET_COUNTS[class_name]
+
+        # -------- UNDERSAMPLING --------
+        if len(samples) > target:
+            samples = random.sample(samples, target)
+
+        # -------- OVERSAMPLING --------
+        while len(samples) < target:
+            base = random.choice(class_buckets[class_name])
+
+            success = False
+            attempts = 0
+
+            while not success and attempts < 10:
+                img_aug, bboxes_aug, labels_aug = augment_image(
+                    base["img_array"],
+                    [base["bbox"]],
+                    [base["label"]]
+                )
+
+                if len(bboxes_aug) > 0:
+                    samples.append({
+                        "image": base["image"],
+                        "img_array": img_aug,
+                        "bbox": bboxes_aug[0],
+                        "label": labels_aug[0]
+                    })
+                    success = True
+
+                attempts += 1
+
+        final_records.extend(samples)
+
+    random.shuffle(final_records)
+
+    print("🔹 Saving processed images and CSV...")
+
+    csv_rows = []
+
+    for i, record in enumerate(tqdm(final_records)):
+        img_name = f"img_{i}.jpg"
+        save_path = os.path.join(PROCESSED_IMAGE_FOLDER, img_name)
+
+        cv2.imwrite(
+            save_path,
+            cv2.cvtColor(record["img_array"], cv2.COLOR_RGB2BGR)
+        )
+
+        xmin, ymin, xmax, ymax = record["bbox"]
+
+        csv_rows.append({
+            "image": img_name,
+            "xmin": xmin,
+            "ymin": ymin,
+            "xmax": xmax,
+            "ymax": ymax,
+            "class_label": record["label"]
+        })
+
+    df = pd.DataFrame(csv_rows)
     df.to_csv(CSV_FILE, index=False)
-    print(f"Preprocessing complete. CSV saved at: {CSV_FILE}")
-    print(f"Total objects processed: {len(data_records)}")
+
+    print("Preprocessing complete")
+    print(df["class_label"].value_counts())
+    print(f"CSV saved to: {CSV_FILE}")
 
 # ------------------------------
 # Main
