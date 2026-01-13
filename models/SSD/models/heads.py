@@ -1,21 +1,34 @@
 import torch.nn as nn
+from config import NUM_CLASSES
+
 
 class SSDHead(nn.Module):
-    def __init__(self, num_classes, in_channels):
+    def __init__(self):
         super().__init__()
 
-        self.cls_heads = nn.ModuleList()
-        self.box_heads = nn.ModuleList()
+        in_channels = 512          # ← CRITICAL FIX
+        num_anchors = 6
 
-        for c in in_channels:
-            self.cls_heads.append(nn.Conv2d(c, 6 * num_classes, 3, padding=1))
-            self.box_heads.append(nn.Conv2d(c, 6 * 4, 3, padding=1))
+        self.cls_head = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=num_anchors * NUM_CLASSES,
+            kernel_size=3,
+            padding=1
+        )
+
+        self.box_head = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=num_anchors * 4,
+            kernel_size=3,
+            padding=1
+        )
 
     def forward(self, features):
-        cls_preds, box_preds = [], []
+        cls_preds = []
+        box_preds = []
 
-        for f, cls, box in zip(features, self.cls_heads, self.box_heads):
-            cls_preds.append(cls(f))
-            box_preds.append(box(f))
+        for f in features:
+            cls_preds.append(self.cls_head(f))
+            box_preds.append(self.box_head(f))
 
         return cls_preds, box_preds

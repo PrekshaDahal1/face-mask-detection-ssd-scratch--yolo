@@ -6,20 +6,33 @@ from torch.utils.data import DataLoader
 from models.ssd import SSD
 from utils.dataset import MaskDataset
 from utils.loss import ssd_loss
-from config import *
+from config import DEVICE, BATCH_SIZE, LEARNING_RATE, EPOCHS
+
+# SSD classes setup
+# Map your classes: 0 = background for SSD
+CLASS_MAP = {
+    "with_mask": 1,
+    "without_mask": 2,
+    "mask_weared_incorrect": 3
+}
+NUM_CLASSES = len(CLASS_MAP) + 1  
 
 print("Using device:", DEVICE)
 
+# Load dataset
 df = pd.read_csv("data/processed/annotations.csv")
-print(df.columns)
+print("Columns:", df.columns)
 print(df.head())
 
-train_dataset = MaskDataset(df, "data/processed/images")
+# Update dataset mapping inside MaskDataset
+train_dataset = MaskDataset(df, "data/processed/images", label_map=CLASS_MAP)
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-model = SSD().to(DEVICE)
+# Initialize model and optimizer
+model = SSD(num_classes=NUM_CLASSES).to(DEVICE)
 optimizer = optim.SGD(model.parameters(), lr=LEARNING_RATE, momentum=0.9)
 
+# Training loop
 epoch_losses = []
 epoch_accuracies = []
 
@@ -37,17 +50,19 @@ for epoch in range(EPOCHS):
         optimizer.zero_grad()
 
         cls_preds, box_preds = model(images)
-        loss = ssd_loss(cls_preds, box_preds, labels, boxes)
 
+        # Compute SSD loss
+        loss = ssd_loss(cls_preds, box_preds, labels, boxes)
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
 
-        cls_preds_flat = cls_preds[0].permute(0, 2, 3, 1).reshape(-1, NUM_CLASSES)
+        # Accuracy calculation (ignore background)
+        cls_preds_flat = cls_preds.view(-1, NUM_CLASSES)
         labels_flat = labels.view(-1)
 
-        pos_mask = labels_flat > 0
+        pos_mask = labels_flat > 0  # ignore background
         if pos_mask.sum() > 0:
             preds = cls_preds_flat[pos_mask].argmax(dim=1)
             correct += (preds == labels_flat[pos_mask]).sum().item()
@@ -62,7 +77,10 @@ for epoch in range(EPOCHS):
     print(f"Epoch [{epoch+1}/{EPOCHS}] "
           f"Loss: {epoch_loss:.4f} | Accuracy: {epoch_acc:.4f}")
 
+    # Save checkpoint
     torch.save(
         model.state_dict(),
         f"outputs/checkpoints/ssd_epoch_{epoch+1}.pth"
     )
+
+print("Training complete.")
