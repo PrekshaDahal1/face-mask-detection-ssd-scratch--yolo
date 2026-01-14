@@ -6,7 +6,6 @@ class Backbone(nn.Module):
         super().__init__()
 
         if name == "vgg":
-            # vgg = vgg16(pretrained=False)
             vgg = vgg16(weights=None).features
             self.features = vgg.features
             self.out_channels = [512, 1024]

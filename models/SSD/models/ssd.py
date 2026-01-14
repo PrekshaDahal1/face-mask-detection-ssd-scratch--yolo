@@ -1,63 +1,76 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torchvision import models
+from torchvision.models import vgg16, VGG16_Weights
+
 
 class SSD(nn.Module):
-    def __init__(self, num_classes=4):
-        """
-        Single Shot Multibox Detector (SSD) simplified version for Face Mask Detection
-        Args:
-            num_classes: total classes including background
-        """
-        super(SSD, self).__init__()
-        self.num_classes = num_classes
+    def __init__(self, num_classes):
+        super().__init__()
 
-        # ----------------------------
-        # Backbone: pre-trained VGG16
-        # ----------------------------
-        vgg = models.vgg16(pretrained=True).features
+        # -------------------------------------------------
+        # VGG16 BACKBONE (up to conv4_3)
+        # -------------------------------------------------
+        vgg = vgg16(weights=VGG16_Weights.DEFAULT)
 
-        # Use first 23 layers as backbone
-        self.backbone = nn.Sequential(*list(vgg)[:23])
+        # IMPORTANT: slice vgg.features, not vgg itself
+        self.backbone = nn.Sequential(
+            *list(vgg.features)[:23]   # conv4_3
+        )
 
-        # Extra layers for SSD
+        # -------------------------------------------------
+        # EXTRA FEATURE LAYERS (simplified SSD)
+        # -------------------------------------------------
         self.extra_layers = nn.Sequential(
-            nn.Conv2d(512, 1024, kernel_size=3, padding=1),
+            nn.Conv2d(512, 256, kernel_size=3, stride=2, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(1024, 1024, kernel_size=1),
+
+            nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1),
             nn.ReLU(inplace=True)
         )
 
-        # Classification head (per feature map)
-        # For simplicity, assuming 1 anchor per location
-        self.cls_head = nn.Conv2d(1024, self.num_classes, kernel_size=3, padding=1)
+        # -------------------------------------------------
+        # PREDICTION HEADS
+        # -------------------------------------------------
+        # Number of anchors per spatial location (simplified)
+        num_anchors = 4
 
-        # Box regression head
-        self.box_head = nn.Conv2d(1024, 4, kernel_size=3, padding=1)  # 4 coordinates per box
+        self.cls_head = nn.Conv2d(
+            256, num_anchors * num_classes, kernel_size=3, padding=1
+        )
+
+        self.box_head = nn.Conv2d(
+            256, num_anchors * 4, kernel_size=3, padding=1
+        )
+
+        self.num_classes = num_classes
+        self.num_anchors = num_anchors
 
     def forward(self, x):
-        """
-        Forward pass
-        Args:
-            x: input images [B, 3, 300, 300]
-        Returns:
-            cls_preds: [B, num_anchors, num_classes]
-            box_preds: [B, num_anchors, 4]
-        """
-        # Backbone feature extraction
+        batch_size = x.size(0)
+
+        # Backbone
         x = self.backbone(x)
+
+        # Extra layers
         x = self.extra_layers(x)
 
-        # Classification predictions
-        cls_preds = self.cls_head(x)  # [B, num_classes, H, W]
+        # Predictions
+        cls_preds = self.cls_head(x)
+        box_preds = self.box_head(x)
 
-        # Box predictions
-        box_preds = self.box_head(x)  # [B, 4, H, W]
+        # -------------------------------------------------
+        # RESHAPE TO SSD FORMAT
+        # -------------------------------------------------
+        # cls_preds: [B, A*C, H, W] → [B, H*W*A, C]
+        cls_preds = cls_preds.permute(0, 2, 3, 1).contiguous()
+        cls_preds = cls_preds.view(
+            batch_size, -1, self.num_classes
+        )
 
-        # Flatten predictions per anchor
-        B, C, H, W = cls_preds.shape
-        cls_preds = cls_preds.permute(0, 2, 3, 1).contiguous().view(B, -1, self.num_classes)
-        box_preds = box_preds.permute(0, 2, 3, 1).contiguous().view(B, -1, 4)
+        # box_preds: [B, A*4, H, W] → [B, H*W*A, 4]
+        box_preds = box_preds.permute(0, 2, 3, 1).contiguous()
+        box_preds = box_preds.view(
+            batch_size, -1, 4
+        )
 
         return cls_preds, box_preds

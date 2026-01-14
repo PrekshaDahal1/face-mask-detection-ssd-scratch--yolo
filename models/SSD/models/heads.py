@@ -6,7 +6,7 @@ class SSDHead(nn.Module):
     def __init__(self):
         super().__init__()
 
-        in_channels = 512          # ← CRITICAL FIX
+        in_channels = 512
         num_anchors = 6
 
         self.cls_head = nn.Conv2d(

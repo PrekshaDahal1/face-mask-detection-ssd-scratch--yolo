@@ -2,39 +2,39 @@ import torch
 import torch.nn.functional as F
 
 
-def ssd_loss(cls_preds, box_preds, labels, boxes):
+def ssd_loss(cls_preds, box_preds, labels, boxes, verbose=False):
     """
-    Simplified SSD loss (no anchor matching).
-    Used for academic / prototype training.
+    Simplified SSD loss (academic prototype).
     """
 
-    # Concatenate predictions from all feature maps
-    cls_preds = torch.cat(
-        [c.permute(0, 2, 3, 1).reshape(c.size(0), -1, c.size(1) // 6)
-         for c in cls_preds],
-        dim=1
-    )
+    batch_size = cls_preds.shape[0]
 
-    box_preds = torch.cat(
-        [b.permute(0, 2, 3, 1).reshape(b.size(0), -1, 4)
-         for b in box_preds],
-        dim=1
-    )
+    # Flatten predictions
+    cls_preds = cls_preds.reshape(-1, cls_preds.shape[-1])
+    box_preds = box_preds.reshape(-1, 4)
 
     # Use first GT box per image (simplification)
-    box_targets = boxes[:, 0, :]
-    cls_targets = labels[:, 0]
-
-    # Classification loss
-    cls_loss = F.cross_entropy(
-        cls_preds[:, 0, :],
-        cls_targets
+    cls_targets = labels[:, 0].repeat_interleave(
+        cls_preds.shape[0] // batch_size
+    )
+    box_targets = boxes[:, 0, :].repeat_interleave(
+        box_preds.shape[0] // batch_size, dim=0
     )
 
-    # Box regression loss
-    box_loss = F.smooth_l1_loss(
-        box_preds[:, 0, :],
-        box_targets
-    )
+    # -------------------------------
+    # CLAMP BOX PREDICTIONS
+    # -------------------------------
+    box_preds = torch.clamp(box_preds, 0.0, 1.0)
+
+    if verbose:
+        print("---- SSD LOSS DEBUG ----")
+        print("cls_preds:", cls_preds.shape)
+        print("cls_targets:", cls_targets.shape)
+        print("box_preds:", box_preds.shape)
+        print("box_targets:", box_targets.shape)
+        print("------------------------")
+
+    cls_loss = F.cross_entropy(cls_preds, cls_targets)
+    box_loss = F.smooth_l1_loss(box_preds, box_targets)
 
     return cls_loss + box_loss
