@@ -1,6 +1,6 @@
 import torch
 
-NUM_CLASSES = 3  # with_mask, without_mask, mask_incorrect
+NUM_CLASSES = 4  # with_mask, without_mask, mask_incorrect
 IMAGE_SIZE = 300
 
 BATCH_SIZE = 16

@@ -1,0 +1,14 @@
+# data/yolo/data.yaml
+
+# Absolute paths to train and validation images
+train: /Users/prekshadahal/Desktop/Masters/Year 2/Computer Vision/Face-Mask Detection/data/yolo/images/train
+val:   /Users/prekshadahal/Desktop/Masters/Year 2/Computer Vision/Face-Mask Detection/data/yolo/images/val
+
+# Number of classes
+nc: 3
+
+# Class names
+names:
+  - with_mask
+  - without_mask
+  - mask_weared_incorrect
